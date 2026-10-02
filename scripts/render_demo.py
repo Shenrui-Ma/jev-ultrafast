@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import shutil
 import statistics
 import subprocess
 from pathlib import Path
@@ -47,8 +48,13 @@ for i in range(round((end + 500) * 30 / 1000)):
     if frame_path != current_path:
         if screenshot is not None:
             screenshot.close()
-        with Image.open(frame_path) as image:
-            screenshot = image.convert("RGB")
+        try:
+            with Image.open(frame_path) as image:
+                screenshot = image.convert("RGB")
+        except OSError:
+            # This directory was created by this run; allow retry after repairing the source frame.
+            shutil.rmtree(folder)
+            raise
         current_path = frame_path
     canvas = Image.new("RGB", (1536, 1000), "#f3f4ec")
     d = ImageDraw.Draw(canvas)

@@ -131,10 +131,57 @@ def test_render_selects_frames_without_preloading(recording, monkeypatch, timest
     )
 
 
-def test_selected_invalid_image_stops_before_encoding(recording):
+@pytest.mark.parametrize("failure", ["corrupt", "truncated", "missing", "missing_initial"])
+def test_failed_frame_read_allows_retry(recording, monkeypatch, failure):
     script, source, encode = recording
     save_frame(source / "frames/000000.jpg", "gray")
-    (source / "screencast/000100.jpg").write_bytes(b"invalid JPEG")
-    with pytest.raises(UnidentifiedImageError):
+    selected = source / "screencast/000100.jpg"
+    save_frame(selected, "blue")
+    if failure == "missing_initial":
+        selected = source / "frames/000000.jpg"
+    open_image = Image.open
+    partial_outputs = []
+
+    def fail_read(path, *args, **kwargs):
+        if Path(path) == selected:
+            partial_outputs.append(len(list((source / "video-frames").glob("*.png"))))
+            if failure.startswith("missing"):
+                selected.unlink()
+            elif failure == "truncated":
+                selected.write_bytes(selected.read_bytes()[:-100])
+                with open_image(selected) as header:
+                    assert header.size == (1120, 780)  # Decoding, not opening, must fail.
+            else:
+                selected.write_bytes(b"invalid JPEG")
+        return open_image(path, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(Image, "open", fail_read)
+        error = (FileNotFoundError if failure.startswith("missing") else
+                 OSError if failure == "truncated" else UnidentifiedImageError)
+        with pytest.raises(error):
+            runpy.run_path(str(script), run_name="__main__")
+    encode.assert_not_called()
+    assert partial_outputs == [0 if failure == "missing_initial" else 3]
+    assert not (source / "video-frames").exists()
+    assert (source / "state.json").exists()
+    if failure != "missing_initial":
+        assert (source / "frames/000000.jpg").exists()
+
+    save_frame(selected, "blue")
+    runpy.run_path(str(script), run_name="__main__")
+    assert len(list((source / "video-frames").glob("*.png"))) == 18
+    assert encode.call_count == 2
+
+
+def test_existing_output_directory_is_preserved(recording):
+    script, source, encode = recording
+    save_frame(source / "frames/000000.jpg", "gray")
+    output = source / "video-frames"
+    output.mkdir()
+    existing = output / "keep.txt"
+    existing.write_text("previous output")
+    with pytest.raises(FileExistsError):
         runpy.run_path(str(script), run_name="__main__")
+    assert existing.read_text() == "previous output"
     encode.assert_not_called()
